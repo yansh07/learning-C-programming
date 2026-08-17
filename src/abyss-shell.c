@@ -4,6 +4,44 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+
+
+int handle_redirection(char **args, int *arg_count) {
+    for (int i = 0; i < *arg_count; i++) {
+        int flags;
+        if (strcmp(args[i], ">") == 0) {
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+        } else if (strcmp(args[i], ">>") == 0) {
+            flags = O_WRONLY | O_CREAT | O_APPEND;
+        } else {
+            continue;
+        }
+
+        if (args[i + 1] == NULL) {
+            fprintf(stderr, "abyss-shell: syntax error near unexpected token 'newline'\n");
+            return -1;
+        }
+
+        int fd = open(args[i + 1], flags, 0644);
+        if (fd < 0) {
+            perror("open");
+            return -1;
+        }
+
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            perror("dup2");
+            close(fd);
+            return -1;
+        }
+        close(fd); //stdout now points at the file, this fd copy is no longer needed
+
+        args[i] = NULL;   //truncate argv here so execvp doesn't see "> file.txt" as args
+        *arg_count = i;
+        return 0;
+    }
+    return 0; //no redirection operator present, nothing to do
+}
 
 int main() {
     while(1) {
@@ -61,7 +99,7 @@ int main() {
                 break;
             }
             if (strcmp(args[0], "cd") == 0) {
-                if (args[1] != NULL) {
+    if (args[1] != NULL) {
                     if (chdir(args[1]) != 0) {
                         perror("cd");
                     }
@@ -72,6 +110,9 @@ int main() {
             //rest commands, fork()
             pid_t pid = fork();
             if (pid == 0) {
+                if (handle_redirection(args, &arg_count) < 0) {
+                    exit(EXIT_FAILURE);
+                }
                 execvp(args[0], args);
                 perror("Execution failed!!");
                 exit(EXIT_FAILURE);
@@ -124,6 +165,9 @@ int main() {
                     args[arg_count] = NULL;
 
                     if (arg_count > 0) {
+                        if (handle_redirection(args, &arg_count) < 0) {
+                            exit(EXIT_FAILURE);
+                        }
                         execvp(args[0], args);
                         perror("Pipe Command Failed");
                     }
