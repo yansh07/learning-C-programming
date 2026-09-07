@@ -10,6 +10,7 @@ This project was developed to gain a deep, unabstracted understanding of operati
 - **Pipeline Support:** Handles complex multi-stage pipelines (e.g., `ls -la | grep .c | wc -l`) with dynamic pipe allocation, efficient file descriptor routing, and proper cleanup to prevent deadlocks.
 - **Two-Phase Parsing:** Implements a strict parsing algorithm to handle both pipe operators and command arguments without `strtok` state corruption.
 - **Built-in Commands:** Supports `cd` and `exit` commands executed directly in the parent process.
+- **Background Jobs:** Supports single-command jobs with `&`, plus the `jobs` command for listing running jobs.
 - **Error Handling:** Comprehensive error checking and reporting for system calls.
 
 ## Technical Details
@@ -53,8 +54,12 @@ abyss-shell> ls -l | grep .c
 abyss-shell> cat file.txt | sort | uniq
 abyss-shell> pwd
 abyss-shell> cd /path/to/dir
+abyss-shell> sleep 10 &
+abyss-shell> jobs
 abyss-shell> exit
 ```
+
+Background pipelines are not currently supported.
 
 ## Build Targets
 

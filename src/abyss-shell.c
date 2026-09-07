@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L //must be first - god complex things
+#define MAX_JOBS 32
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -8,9 +9,68 @@
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
-
-//signal handling
 #include <signal.h>
+
+//background jobs
+
+struct Job {
+    int job_id;
+    pid_t pid;
+    char command[128];
+    int is_running;
+};
+struct Job jobs[MAX_JOBS];
+int job_count = 0;
+int next_job_id = 1;
+
+int add_job(pid_t pid, const char *command) {
+    int slot = -1;
+    for (int i = 0; i < job_count; i++) {
+        if (!jobs[i].is_running) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1 && job_count < MAX_JOBS) {
+        slot = job_count++;
+    }
+
+    if (slot == -1) {
+        fprintf(stderr, "abyss-shell: job table full\n");
+        return -1;
+    }
+    jobs[slot].job_id = next_job_id++;
+    jobs[slot].pid = pid;
+
+    strncpy(jobs[slot].command, command, sizeof(jobs[slot].command) - 1);
+    jobs[slot].command[sizeof(jobs[slot].command) - 1] = '\0';
+    jobs[slot].is_running = 1;
+    return jobs[slot].job_id;
+}
+
+void update_jobs(void) {
+    int status;
+    for (int i = 0; i < job_count; i++) {
+        if (!jobs[i].is_running){
+            continue;
+        }
+        pid_t result = waitpid(jobs[i].pid, &status, WNOHANG);
+        if (result == jobs[i].pid) {
+            jobs[i].is_running = 0;
+            printf("[%d]+ Done %s\n", jobs[i].job_id, jobs[i].command);
+        }
+    }
+}
+
+void print_jobs(void) {
+    update_jobs();
+    for (int i = 0; i < job_count; i++) {
+        if (jobs[i].is_running) {
+            printf("[%d]+ Running %s\n", jobs[i].job_id, jobs[i].command);
+        }
+    }
+}
 
 void handle_signal(int sig){
     (void)sig; //silence unused parameter handling
@@ -72,6 +132,8 @@ int main() {
     init_signals();
 
     while(1) {
+        update_jobs();
+
         //phase - 1, pipe splits
         char input[1024];
         printf("abyss-shell> ");
@@ -92,11 +154,26 @@ int main() {
             perror("fgets");
             break;
         }
-        //if it wasn't EINTR, it's a real ctrl+d
-        printf("\n");
-        break;
-
         input[strcspn(input, "\n")] = '\0'; //will remove trailing newline character
+
+        char command_copy[sizeof(input)];
+        snprintf(command_copy, sizeof(command_copy), "%s", input);
+
+        int background = 0;
+        size_t input_length = strlen(input);
+        while (input_length > 0 && (input[input_length - 1] == ' ' ||
+                                    input[input_length - 1] == '\t')) {
+            input[--input_length] = '\0';
+        }
+        if (input_length > 0 && input[input_length - 1] == '&') {
+            background = 1;
+            input[--input_length] = '\0';
+            while (input_length > 0 && (input[input_length - 1] == ' ' ||
+                                        input[input_length - 1] == '\t')) {
+                input[--input_length] = '\0';
+            }
+            snprintf(command_copy, sizeof(command_copy), "%s", input);
+        }
 
         //skip processing if user pressed enter
         if (strlen(input) == 0) {
@@ -116,6 +193,10 @@ int main() {
         cmd_string[N] = NULL;
         
         if (N == 0) continue;   
+        if (background && N > 1) {
+            fprintf(stderr, "abyss-shell: background pipelines are not supported\n");
+            continue;
+        }
         //------------------------------------phase-1, done.
         
         //phase - 2, execution and space split
@@ -139,11 +220,15 @@ int main() {
                 break;
             }
             if (strcmp(args[0], "cd") == 0) {
-    if (args[1] != NULL) {
+                if (args[1] != NULL) {
                     if (chdir(args[1]) != 0) {
                         perror("cd");
                     }
                 }
+                continue;
+            }
+            if (strcmp(args[0], "jobs") == 0) {
+                print_jobs();
                 continue;
             }
 
@@ -165,7 +250,16 @@ int main() {
                 perror("Execution failed!!");
                 exit(EXIT_FAILURE);
             } else if (pid > 0) {
-                wait(NULL); //wait for single child to finish
+                if (background) {
+                    int job_id = add_job(pid, command_copy);
+                    if (job_id >= 0) {
+                        printf("[%d] %d\n", job_id, pid);
+                    } else {
+                        waitpid(pid, NULL, 0);
+                    }
+                } else {
+                    waitpid(pid, NULL, 0); //wait for foreground child
+                }
             } else {
                 perror("Fork Failed!!!");
             }
