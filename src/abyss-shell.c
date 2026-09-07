@@ -14,17 +14,21 @@
 
 void handle_signal(int sig){
     (void)sig; //silence unused parameter handling
-    ssize_t bytes_written = write(STDOUT_FILENO,
-                                  "\n[abyss-shell] Interrupt ignored. Hit Enter for prompt.\n", 57);
+    const char msg[] = "\n[abyss-shell] Interrupt Ignore. Hit enter for prompt.\n";
+    ssize_t bytes_written = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
     (void)bytes_written;
 }
 
 void init_signals(void){
     struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART; //restart syscalls if interrupted
-    sigaction(SIGINT, &sa, NULL);
+    if (sigaction(SIGINT, &sa, NULL) != 0){
+        perror("sigaction(SIGINT)");
+        exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -73,17 +77,24 @@ int main() {
         printf("abyss-shell> ");
         fflush(stdout); //to make sure that prompt shows immediately
 
-        //check if NULL was caused by Ctrl+c  or actuall EOF (Ctrl+d)
-        if (fgets(input, 1024, stdin) == NULL) {
-            if(errno == EINTR) {
+        //if fgets() returns NULL, it can be due to SIGINT interruption or actual EOF ctrl+d
+        errno = 0;
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            if (feof(stdin)) {
+                printf("\n");
+                break;
+            }
+            if (ferror(stdin) && errno == EINTR) {
                 clearerr(stdin); //clear the stream error flag
                 printf("\n"); //jump to fresh line
-                continue; //restart the prompt loop
+                continue; // restart the prompt loop
             }
-            //if it wasn't EINTR, it's a real ctrl+d
-            printf("\n");
+            perror("fgets");
             break;
         }
+        //if it wasn't EINTR, it's a real ctrl+d
+        printf("\n");
+        break;
 
         input[strcspn(input, "\n")] = '\0'; //will remove trailing newline character
 
