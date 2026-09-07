@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L //must be first - god complex things
+
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -5,6 +7,25 @@
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
+#include <errno.h>
+
+//signal handling
+#include <signal.h>
+
+void handle_signal(int sig){
+    (void)sig; //silence unused parameter handling
+    ssize_t bytes_written = write(STDOUT_FILENO,
+                                  "\n[abyss-shell] Interrupt ignored. Hit Enter for prompt.\n", 57);
+    (void)bytes_written;
+}
+
+void init_signals(void){
+    struct sigaction sa;
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; //restart syscalls if interrupted
+    sigaction(SIGINT, &sa, NULL);
+}
 
 
 int handle_redirection(char **args, int *arg_count) {
@@ -44,14 +65,22 @@ int handle_redirection(char **args, int *arg_count) {
 }
 
 int main() {
+    init_signals();
+
     while(1) {
         //phase - 1, pipe splits
         char input[1024];
         printf("abyss-shell> ");
         fflush(stdout); //to make sure that prompt shows immediately
 
-        //to handle ctrl+d
+        //check if NULL was caused by Ctrl+c  or actuall EOF (Ctrl+d)
         if (fgets(input, 1024, stdin) == NULL) {
+            if(errno == EINTR) {
+                clearerr(stdin); //clear the stream error flag
+                printf("\n"); //jump to fresh line
+                continue; //restart the prompt loop
+            }
+            //if it wasn't EINTR, it's a real ctrl+d
             printf("\n");
             break;
         }
@@ -110,6 +139,14 @@ int main() {
             //rest commands, fork()
             pid_t pid = fork();
             if (pid == 0) {
+                //let the foreground command respond normally to Ctrl+C
+                struct sigaction sa;
+                sa.sa_handler = SIG_DFL;
+                sigemptyset(&sa.sa_mask);
+                sa.sa_flags = 0;
+                sigaction(SIGINT, &sa, NULL);
+
+                //execute command
                 if (handle_redirection(args, &arg_count) < 0) {
                     exit(EXIT_FAILURE);
                 }
@@ -142,6 +179,14 @@ int main() {
                 pid_t pid = fork();
 
                 if (pid == 0){
+                    
+                    //reset SIGINT so the child responds normally to ctrl + c
+                    struct sigaction sa;
+                    sa.sa_handler = SIG_DFL;
+                    sigemptyset(&sa.sa_mask);
+                    sa.sa_flags = 0;
+                    sigaction(SIGINT, &sa, NULL);
+
                     //wiring input - mtlb if not first command, read from prev pipe
                     if(i > 0) {
                         dup2(pipefds[2 * (i - 1)], STDIN_FILENO);
