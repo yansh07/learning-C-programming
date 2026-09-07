@@ -398,12 +398,18 @@ int main() {
                     reset_child_signal_handling();
 
                     //wiring input - mtlb if not first command, read from prev pipe
-                    if(i > 0) {
-                        dup2(pipefds[2 * (i - 1)], STDIN_FILENO);
+                    if (i > 0) {
+                        if(dup2(pipefds[2*(i-1)], STDIN_FILENO) < 0) {
+                            perror("dup2 stdin");
+                            _exit(EXIT_FAILURE);
+                        }
                     }
                     //wiring output - if not the last command, write to next pipe
                     if (i < N - 1) {
-                        dup2(pipefds[2 * i + 1], STDOUT_FILENO);
+                        if (dup2(pipefds[2*i+1], STDOUT_FILENO) < 0) {
+                            perror("dup2 stdout");
+                            _exit(EXIT_FAILURE);
+                        }
                     }
                     //close all pipe copies in child space
                     for (int j = 0; j < 2 * num_pipes; j++) {
