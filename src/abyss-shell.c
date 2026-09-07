@@ -1,5 +1,9 @@
 #define _POSIX_C_SOURCE 200809L //must be first - god complex things
 #define MAX_JOBS 32
+#define JOB_COMMAND_SIZE 128
+#define MAX_ARGUMENTS 64
+#define MAX_PIPE_COMMANDS 20
+#define OUTPUT_FILE_MODE 0644
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -9,14 +13,19 @@
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+
+extern char **environ;
 
 //background jobs
 
 struct Job {
     int job_id;
     pid_t pid;
-    char command[128];
+    char command[JOB_COMMAND_SIZE];
     int is_running;
 };
 struct Job jobs[MAX_JOBS];
@@ -43,8 +52,7 @@ int add_job(pid_t pid, const char *command) {
     jobs[slot].job_id = next_job_id++;
     jobs[slot].pid = pid;
 
-    strncpy(jobs[slot].command, command, sizeof(jobs[slot].command) - 1);
-    jobs[slot].command[sizeof(jobs[slot].command) - 1] = '\0';
+    snprintf(jobs[slot].command, sizeof(jobs[slot].command), "%s", command);
     jobs[slot].is_running = 1;
     return jobs[slot].job_id;
 }
@@ -59,6 +67,8 @@ void update_jobs(void) {
         if (result == jobs[i].pid) {
             jobs[i].is_running = 0;
             printf("[%d]+ Done %s\n", jobs[i].job_id, jobs[i].command);
+        } else if (result < 0 && errno == ECHILD) {
+            jobs[i].is_running = 0;
         }
     }
 }
@@ -70,6 +80,28 @@ void print_jobs(void) {
             printf("[%d]+ Running %s\n", jobs[i].job_id, jobs[i].command);
         }
     }
+}
+
+int find_job_index(int job_id) {
+    for(int i = 0; i < job_count; i++) {
+        if(jobs[i].job_id == job_id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int parse_job_id(const char *text) {
+    char *end;
+    long value;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || *text == '\0' || *end != '\0' || value <= 0 ||
+        value > INT_MAX) {
+        return -1;
+    }
+    return (int)value;
 }
 
 void handle_signal(int sig){
@@ -108,7 +140,7 @@ int handle_redirection(char **args, int *arg_count) {
             return -1;
         }
 
-        int fd = open(args[i + 1], flags, 0644);
+        int fd = open(args[i + 1], flags, OUTPUT_FILE_MODE);
         if (fd < 0) {
             perror("open");
             return -1;
@@ -128,35 +160,43 @@ int handle_redirection(char **args, int *arg_count) {
     return 0; //no redirection operator present, nothing to do
 }
 
+void reset_child_signal_handling(void) {
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        perror("sigaction(SIGINT)");
+        _exit(EXIT_FAILURE);
+    }
+}
+
+void wait_for_child(pid_t pid) {
+    while (waitpid(pid, NULL, 0) < 0) {
+        if (errno != EINTR) {
+            perror("abyss-shell: waitpid");
+            break;
+        }
+    }
+}
+
 int main() {
     init_signals();
 
     while(1) {
         update_jobs();
-
-        //phase - 1, pipe splits
-        char input[1024];
-        printf("abyss-shell> ");
-        fflush(stdout); //to make sure that prompt shows immediately
-
-        //if fgets() returns NULL, it can be due to SIGINT interruption or actual EOF ctrl+d
-        errno = 0;
-        if (fgets(input, sizeof(input), stdin) == NULL) {
-            if (feof(stdin)) {
-                printf("\n");
-                break;
-            }
-            if (ferror(stdin) && errno == EINTR) {
-                clearerr(stdin); //clear the stream error flag
-                printf("\n"); //jump to fresh line
-                continue; // restart the prompt loop
-            }
-            perror("fgets");
+        char *input = readline("abyss-shell> ");
+        if (input == NULL) {
+            printf("\n");
             break;
         }
-        input[strcspn(input, "\n")] = '\0'; //will remove trailing newline character
 
-        char command_copy[sizeof(input)];
+        if (strlen(input) > 0) {
+            add_history(input);
+        }
+
+        char command_copy[JOB_COMMAND_SIZE];
         snprintf(command_copy, sizeof(command_copy), "%s", input);
 
         int background = 0;
@@ -177,46 +217,50 @@ int main() {
 
         //skip processing if user pressed enter
         if (strlen(input) == 0) {
-            continue;
+            goto next_iteration;
         }
 
-        char *cmd_string[20];
+        char *cmd_string[MAX_PIPE_COMMANDS + 1];
         int N = 0; //tracks the total number of chunks
 
         char *token = strtok(input, "|");
-        //prevent buffer overflow
-        while(token != NULL && N < 20) {
+        while(token != NULL && N < MAX_PIPE_COMMANDS) {
             cmd_string[N] = token;
             N++;
             token = strtok(NULL, "|");
         } 
         cmd_string[N] = NULL;
         
-        if (N == 0) continue;   
+        if (token != NULL) {
+            fprintf(stderr, "abyss-shell: too many pipeline commands\n");
+            goto next_iteration;
+        }
+        if (N == 0) goto next_iteration;
         if (background && N > 1) {
             fprintf(stderr, "abyss-shell: background pipelines are not supported\n");
-            continue;
+            goto next_iteration;
         }
         //------------------------------------phase-1, done.
         
         //phase - 2, execution and space split
         
         if (N == 1) {
-            char *args[64];
+            char *args[MAX_ARGUMENTS];
             int arg_count = 0;
 
             //tokenize into an array of strings
             char *arg_token = strtok(cmd_string[0], " ");
-            while (arg_token != NULL && arg_count < 63) {
+            while (arg_token != NULL && arg_count < MAX_ARGUMENTS - 1) {
                 args[arg_count++] = arg_token;
                 arg_token = strtok(NULL, " ");
             }
             args[arg_count] = NULL;
 
-            if (arg_count == 0) continue; //skip if it was just a space
+            if (arg_count == 0) goto next_iteration; //skip if it was just a space
 
             //handle built-in
             if (strcmp(args[0], "exit") == 0) {
+                free(input);
                 break;
             }
             if (strcmp(args[0], "cd") == 0) {
@@ -225,22 +269,85 @@ int main() {
                         perror("cd");
                     }
                 }
-                continue;
+                goto next_iteration;
             }
             if (strcmp(args[0], "jobs") == 0) {
                 print_jobs();
-                continue;
+                goto next_iteration;
+            }
+
+            if (strcmp(args[0], "export") == 0) {
+                if(args[1] == NULL) {
+                    fprintf(stderr, "abyss-shell: export: missing argument\n");
+                    goto next_iteration;
+                }
+
+                char *equals = strchr(args[1], '=');
+
+                if (equals == NULL) {
+                    fprintf(stderr, "abyss-shell: export: invalid format\n");
+                    goto next_iteration;
+                }
+
+                *equals = '\0';
+
+                char *name = args[1];
+                char *value = equals + 1;
+
+                if(*name == '\0') {
+                    fprintf(stderr, "abyss-shell: export invalid variable name\n");
+                    goto next_iteration;
+                }
+
+                if (setenv(name, value, 1) != 0) {
+                    perror("abyss-shell: export");
+                }
+                goto next_iteration;
+            }
+
+            if (strcmp(args[0], "env") == 0) {
+                for (char **env = environ; *env != NULL; env++) {
+                    printf("%s\n", *env);
+                }
+                goto next_iteration;
+            }
+
+            if (strcmp(args[0], "fg") == 0) {
+                if (args[1] == NULL) {
+                    fprintf(stderr, "abyss-shell: fg: job id required\n");
+                    goto next_iteration;
+                }
+
+                int job_id = parse_job_id(args[1]);
+
+                if (job_id < 0) {
+                    fprintf(stderr, "abyss-shell: fg: invalid job id\n");
+                    goto next_iteration;
+                }
+
+                int index = find_job_index(job_id);
+
+                if (index == -1){
+                    fprintf(stderr, "abyss-shell: fg: no such jobs\n");
+                    goto next_iteration;
+                }
+
+                if(!jobs[index].is_running) {
+                    fprintf(stderr, "abyss-shell: fg: job already completed\n");
+                    goto next_iteration;
+                }
+
+                printf("%s\n", jobs[index].command);
+                wait_for_child(jobs[index].pid);
+                jobs[index].is_running = 0;
+                goto next_iteration;
             }
 
             //rest commands, fork()
             pid_t pid = fork();
             if (pid == 0) {
                 //let the foreground command respond normally to Ctrl+C
-                struct sigaction sa;
-                sa.sa_handler = SIG_DFL;
-                sigemptyset(&sa.sa_mask);
-                sa.sa_flags = 0;
-                sigaction(SIGINT, &sa, NULL);
+                reset_child_signal_handling();
 
                 //execute command
                 if (handle_redirection(args, &arg_count) < 0) {
@@ -255,10 +362,10 @@ int main() {
                     if (job_id >= 0) {
                         printf("[%d] %d\n", job_id, pid);
                     } else {
-                        waitpid(pid, NULL, 0);
+                        wait_for_child(pid);
                     }
                 } else {
-                    waitpid(pid, NULL, 0); //wait for foreground child
+                    wait_for_child(pid); //wait for foreground child
                 }
             } else {
                 perror("Fork Failed!!!");
@@ -270,6 +377,8 @@ int main() {
             //allocate 2 * (N-1) file descriptors
             int num_pipes = N - 1;
             int pipefds[2 * num_pipes];
+            pid_t child_pids[MAX_PIPE_COMMANDS];
+            int child_count = 0;
 
             //initialize all pipes
             for (int i = 0; i < num_pipes; i++) {
@@ -286,11 +395,7 @@ int main() {
                 if (pid == 0){
                     
                     //reset SIGINT so the child responds normally to ctrl + c
-                    struct sigaction sa;
-                    sa.sa_handler = SIG_DFL;
-                    sigemptyset(&sa.sa_mask);
-                    sa.sa_flags = 0;
-                    sigaction(SIGINT, &sa, NULL);
+                    reset_child_signal_handling();
 
                     //wiring input - mtlb if not first command, read from prev pipe
                     if(i > 0) {
@@ -305,10 +410,10 @@ int main() {
                         close(pipefds[j]);
                     }
                     //tokenize spaces for this specific chunk
-                    char *args[64];
+                    char *args[MAX_ARGUMENTS];
                     int arg_count = 0;
                     char *arg_token = strtok(cmd_string[i], " ");
-                    while (arg_token != NULL && arg_count < 63) {
+                    while (arg_token != NULL && arg_count < MAX_ARGUMENTS - 1) {
                         args[arg_count++] = arg_token;
                         arg_token = strtok(NULL, " ");
                     }
@@ -324,6 +429,8 @@ int main() {
                     exit(EXIT_FAILURE);
                 } else if (pid < 0) {
                     perror("Pipe fork failed!!");
+                } else {
+                    child_pids[child_count++] = pid;
                 }
             }
             //parent process - close karde saare descriptors so children receive EOF signals
@@ -332,10 +439,13 @@ int main() {
             }
 
             //wait for all N children to terminate cleanly
-            for (int i = 0; i < N; i++) {
-                wait(NULL);
+            for (int i = 0; i < child_count; i++) {
+                wait_for_child(child_pids[i]);
             }
         }
+    next_iteration:
+        free(input);
     } 
+    clear_history();
     return 0;
 }

@@ -25,7 +25,7 @@ This project was developed to gain a deep, unabstracted understanding of operati
 
 ## Installation & Build
 
-Ensure you have `gcc` and `make` installed:
+Ensure you have `gcc`, `make`, and the GNU Readline development package installed:
 
 ```bash
 # Clone the repository

@@ -4,6 +4,7 @@
 CC ?= gcc
 CFLAGS := -Wall -Wextra -Werror -O2 -g
 LDFLAGS :=
+LDLIBS := -lreadline
 
 # Project structure
 SRC_DIR := src
@@ -28,7 +29,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 
 # Link executable
 $(EXECUTABLE): $(OBJECTS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 	@echo "✓ Build successful: $(EXECUTABLE)"
 
 # Run the shell
